@@ -1,5 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Html5QrcodeScanner, Html5QrcodeScannerConfig, Html5QrcodeResult } from 'html5-qrcode';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Camera, X, RotateCcw, Zap, ZapOff } from 'lucide-react';
 
 interface QRScannerProps {
@@ -8,103 +7,110 @@ interface QRScannerProps {
 }
 
 export function QRScanner({ onScanSuccess, onClose }: QRScannerProps) {
-  const scannerRef = useRef<Html5QrcodeScanner | null>(null);
-  const [isScanning, setIsScanning] = useState(false);
+  type ScannerInstance = { render: (onSuccess: (s: string) => void, onError?: (e: unknown) => void) => void; clear: () => Promise<void> };
+  const scannerRef = useRef<ScannerInstance | null>(null);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [error, setError] = useState<string>('');
   const [torchEnabled, setTorchEnabled] = useState(false);
 
+  const initializeScanner = useCallback(async () => {
+    try {
+      const module = await import('html5-qrcode');
+      const Html5QrcodeScanner = (module as unknown as Record<string, unknown>)['Html5QrcodeScanner'] as unknown as {
+        new (elemId: string, config: unknown, verbose?: boolean): ScannerInstance;
+      };
+
+      const config = {
+        fps: 10,
+        qrbox: { width: 250, height: 250 },
+        aspectRatio: 1.0,
+        disableFlip: false,
+        videoConstraints: { facingMode: 'environment' }
+      };
+
+      const scanner = new Html5QrcodeScanner('qr-reader', config, false);
+      scannerRef.current = scanner;
+
+      scanner.render(
+        (decodedText: string) => {
+          // stop and return result
+          scanner.clear().catch(() => {}).finally(() => {
+            scannerRef.current = null;
+            onScanSuccess(decodedText);
+          });
+        },
+        (err: unknown) => {
+          // ignore frame errors
+          console.debug('QR scan error', err);
+        }
+      );
+
+      setHasPermission(true);
+    } catch (err) {
+      console.error('Failed to init scanner', err);
+      setError("Impossible d'initialiser le scanner QR.");
+      setHasPermission(false);
+    }
+  }, [onScanSuccess]);
+
   useEffect(() => {
-    // Check camera permission
+    let mounted = true;
     navigator.mediaDevices.getUserMedia({ video: true })
       .then(() => {
-        setHasPermission(true);
-        initializeScanner();
+        if (mounted) {
+          setHasPermission(true);
+          initializeScanner();
+        }
       })
-      .catch((err) => {
+      .catch((e) => {
+        console.error('camera permission denied', e);
         setHasPermission(false);
-        setError('Accès à la caméra refusé. Veuillez autoriser l\'accès à la caméra dans les paramètres de votre navigateur.');
-        console.error('Camera permission denied:', err);
+        setError("Accès à la caméra refusé. Veuillez autoriser l'accès à la caméra dans les paramètres de votre navigateur.");
       });
 
     return () => {
-      if (scannerRef.current) {
-        scannerRef.current.clear().catch(console.error);
+      mounted = false;
+      try {
+        scannerRef.current?.clear?.();
+      } catch (e) {
+        console.error('Error clearing scanner on unmount', e);
       }
+      scannerRef.current = null;
     };
-  }, []);
-
-  const initializeScanner = () => {
-    const config: Html5QrcodeScannerConfig = {
-      fps: 10,
-      qrbox: { width: 250, height: 250 },
-      aspectRatio: 1.0,
-      disableFlip: false,
-      videoConstraints: {
-        facingMode: 'environment' // Use back camera by default
-      }
-    };
-
-    const scanner = new Html5QrcodeScanner('qr-reader', config, false);
-    scannerRef.current = scanner;
-
-    scanner.render(
-      (decodedText: string, decodedResult: Html5QrcodeResult) => {
-        console.log('QR Code scanned:', decodedText);
-        setIsScanning(false);
-        onScanSuccess(decodedText);
-        scanner.clear();
-      },
-      (error: string) => {
-        // Handle scan errors silently (they occur frequently during scanning)
-        console.debug('QR scan error:', error);
-      }
-    );
-
-    setIsScanning(true);
-  };
+  }, [initializeScanner]);
 
   const handleRetry = () => {
     setError('');
     setHasPermission(null);
-    
-    navigator.mediaDevices.getUserMedia({ video: true })
-      .then(() => {
-        setHasPermission(true);
-        if (scannerRef.current) {
-          scannerRef.current.clear().then(() => {
-            initializeScanner();
-          });
-        } else {
-          initializeScanner();
-        }
-      })
-      .catch((err) => {
-        setHasPermission(false);
-        setError('Impossible d\'accéder à la caméra. Vérifiez les permissions de votre navigateur.');
-      });
+    initializeScanner();
+  };
+
+  const handleClose = async () => {
+    try {
+      await scannerRef.current?.clear?.();
+    } catch (e) {
+      console.error('Error clearing scanner on close', e);
+    }
+    scannerRef.current = null;
+    onClose();
   };
 
   const toggleTorch = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          facingMode: 'environment',
-          advanced: [{ torch: !torchEnabled } as any]
-        } 
-      });
-      
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
       const track = stream.getVideoTracks()[0];
-      const capabilities = track.getCapabilities();
-      
-      if ('torch' in capabilities) {
-        await track.applyConstraints({
-          advanced: [{ torch: !torchEnabled } as any]
-        });
-        setTorchEnabled(!torchEnabled);
+      const capabilities = track.getCapabilities() as MediaTrackCapabilities;
+  if ((capabilities as unknown as { torch?: unknown }).torch) {
+        try {
+          // @ts-expect-error - browser-specific
+          await track.applyConstraints({ advanced: [{ torch: !torchEnabled }] });
+          setTorchEnabled(prev => !prev);
+        } catch (e) {
+          console.error('applyConstraints torch failed', e);
+        }
       }
-    } catch (err) {
-      console.error('Torch not supported:', err);
+    } catch (e) {
+      console.error('Torch not supported or camera error', e);
     }
   };
 
@@ -117,10 +123,7 @@ export function QRScanner({ onScanSuccess, onClose }: QRScannerProps) {
             <Camera className="h-6 w-6 text-blue-600" />
             <h3 className="text-lg font-semibold text-gray-900">Scanner QR Code</h3>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors"
-          >
+          <button onClick={handleClose} aria-label="Fermer le scanner" className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors">
             <X className="h-5 w-5" />
           </button>
         </div>
@@ -147,10 +150,7 @@ export function QRScanner({ onScanSuccess, onClose }: QRScannerProps) {
                   <li>Vérifier que votre caméra fonctionne</li>
                 </ul>
               </div>
-              <button
-                onClick={handleRetry}
-                className="mt-4 flex items-center space-x-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors mx-auto"
-              >
+              <button onClick={handleRetry} className="mt-4 flex items-center space-x-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors mx-auto">
                 <RotateCcw className="h-4 w-4" />
                 <span>Réessayer</span>
               </button>
@@ -159,11 +159,8 @@ export function QRScanner({ onScanSuccess, onClose }: QRScannerProps) {
 
           {hasPermission === true && (
             <div>
-              {/* Scanner Container */}
               <div className="relative">
                 <div id="qr-reader" className="rounded-lg overflow-hidden"></div>
-                
-                {/* Scanner Overlay */}
                 <div className="absolute inset-0 pointer-events-none">
                   <div className="absolute inset-4 border-2 border-white rounded-lg shadow-lg">
                     <div className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-blue-500 rounded-tl-lg"></div>
@@ -174,46 +171,23 @@ export function QRScanner({ onScanSuccess, onClose }: QRScannerProps) {
                 </div>
               </div>
 
-              {/* Controls */}
               <div className="flex justify-center mt-4">
-                <button
-                  onClick={toggleTorch}
-                  className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition-colors ${
-                    torchEnabled 
-                      ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200' 
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                  }`}
-                >
-                  {torchEnabled ? (
-                    <ZapOff className="h-4 w-4" />
-                  ) : (
-                    <Zap className="h-4 w-4" />
-                  )}
+                <button onClick={toggleTorch} className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition-colors ${torchEnabled ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+                  {torchEnabled ? <ZapOff className="h-4 w-4" /> : <Zap className="h-4 w-4" />}
                   <span>{torchEnabled ? 'Éteindre' : 'Allumer'} la lampe</span>
                 </button>
               </div>
 
-              {/* Instructions */}
               <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
-                <p className="text-sm text-blue-700 text-center">
-                  Positionnez le QR code dans le cadre pour le scanner automatiquement
-                </p>
+                <p className="text-sm text-blue-700 text-center">Positionnez le QR code dans le cadre pour le scanner automatiquement</p>
               </div>
             </div>
           )}
         </div>
 
-        {/* Manual Input Option */}
         <div className="mt-6 pt-4 border-t border-gray-200">
-          <p className="text-sm text-gray-600 text-center mb-2">
-            Problème avec la caméra ?
-          </p>
-          <button
-            onClick={onClose}
-            className="w-full text-sm text-blue-600 hover:text-blue-700 font-medium"
-          >
-            Saisir le code manuellement
-          </button>
+          <p className="text-sm text-gray-600 text-center mb-2">Problème avec la caméra ?</p>
+          <button onClick={handleClose} className="w-full text-sm text-blue-600 hover:text-blue-700 font-medium">Saisir le code manuellement</button>
         </div>
       </div>
     </div>
