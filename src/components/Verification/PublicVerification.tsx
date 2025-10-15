@@ -13,6 +13,7 @@ import {
   Download,
   Eye
 } from 'lucide-react';
+import { QRScanner } from './QRScanner';
 
 interface VerificationResult {
   valid: boolean;
@@ -34,6 +35,7 @@ export function PublicVerification() {
   const [verificationInput, setVerificationInput] = useState('');
   const [isVerifying, setIsVerifying] = useState(false);
   const [result, setResult] = useState<VerificationResult | null>(null);
+  const [showQRScanner, setShowQRScanner] = useState(false);
 
   const handleVerification = async () => {
     setIsVerifying(true);
@@ -76,8 +78,27 @@ export function PublicVerification() {
     setVerificationInput('');
   };
 
+  const handleQRScanSuccess = (decodedText: string) => {
+    setVerificationInput(decodedText);
+    setShowQRScanner(false);
+    // Auto-verify if we got a valid looking code
+    if (decodedText && decodedText.length > 5) {
+      setTimeout(() => {
+        handleVerification();
+      }, 500);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-green-50">
+      {/* QR Scanner Modal */}
+      {showQRScanner && (
+        <QRScanner
+          onScanSuccess={handleQRScanSuccess}
+          onClose={() => setShowQRScanner(false)}
+        />
+      )}
+      
       <div className="container mx-auto px-4 py-12">
         {/* Header */}
         <div className="text-center mb-12">
@@ -164,13 +185,23 @@ export function PublicVerification() {
                   <div className="border-2 border-dashed border-gray-300 rounded-lg p-12 mb-4">
                     <QrCode className="h-12 w-12 text-gray-400 mx-auto mb-4" />
                     <p className="text-gray-600">Scan QR Code with your camera</p>
-                    <button className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+                    <button 
+                      onClick={() => setShowQRScanner(true)}
+                      className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    >
                       Open Camera
                     </button>
                   </div>
                   <p className="text-sm text-gray-500">
-                    Or enter the QR code content manually above
+                    Ou saisissez le contenu du QR code manuellement :
                   </p>
+                  <input
+                    type="text"
+                    value={verificationInput}
+                    onChange={(e) => setVerificationInput(e.target.value)}
+                    placeholder="Contenu du QR code..."
+                    className="mt-2 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
                 </div>
               )}
 
